@@ -8,6 +8,97 @@ import { type ApiConfig } from "../config";
 import type { BunRequest } from "bun";
 import { BadRequestError, NotFoundError, UserForbiddenError } from "./errors";
 
+async function getVideoAspectRatio(filePath: string): Promise<string> {
+  const proc = Bun.spawn({
+    cmd: [
+      "ffprobe",
+      "-v",
+      "error",
+      "-select_streams",
+      "v:0",
+      "-show_entries",
+      "stream=width,height",
+      "-of",
+      "json",
+      filePath,
+    ],
+    stdout: "pipe",
+    stderr: "pipe",
+  });
+
+  const exitCode = await proc.exited;
+  const stdoutText = await new Response(proc.stdout).text();
+  const stderrText = await new Response(proc.stderr).text();
+
+  if (exitCode !== 0) {
+    throw new BadRequestError(
+      `Failed to analyze video: ${stderrText.trim() || `ffprobe exited ${exitCode}`}`,
+    );
+  }
+
+  let metadata;
+  try {
+    metadata = JSON.parse(stdoutText);
+  } catch {
+    throw new BadRequestError("Unable to parse video metadata");
+  }
+
+  const stream = metadata?.streams?.[0];
+  if (!stream || typeof stream.width !== "number" || typeof stream.height !== "number") {
+    throw new BadRequestError("Unable to determine video dimensions");
+  }
+
+  const width = stream.width;
+  const height = stream.height;
+  const ratio = width / height;
+  const landscapeRatio = 16 / 9;
+  const portraitRatio = 9 / 16;
+  const tolerance = 0.03;
+
+  if (Math.abs(ratio - landscapeRatio) < tolerance) {
+    return "landscape";
+  }
+
+  if (Math.abs(ratio - portraitRatio) < tolerance) {
+    return "portrait";
+  }
+
+  return "other";
+}
+
+async function processVideoForFastStart(inputFilePath: string): Promise<string> {
+  const outputFilePath = `${inputFilePath}.processed`;
+  const proc = Bun.spawn({
+    cmd: [
+      "ffmpeg",
+      "-i",
+      inputFilePath,
+      "-movflags",
+      "faststart",
+      "-map_metadata",
+      "0",
+      "-codec",
+      "copy",
+      "-f",
+      "mp4",
+      outputFilePath,
+    ],
+    stdout: "pipe",
+    stderr: "pipe",
+  });
+
+  const exitCode = await proc.exited;
+  const stderrText = await new Response(proc.stderr).text();
+
+  if (exitCode !== 0) {
+    throw new BadRequestError(
+      `Failed to process video for fast start: ${stderrText.trim() || `ffmpeg exited ${exitCode}`}`,
+    );
+  }
+
+  return outputFilePath;
+}
+
 function getFileExtension(mediaType: string) {
   switch (mediaType) {
     case "video/mp4":
@@ -55,17 +146,29 @@ export async function handlerUploadVideo(cfg: ApiConfig, req: BunRequest) {
     throw new BadRequestError("Unsupported video type");
   }
 
-  const key = `${randomBytes(32).toString("hex")}.${extension}`;
-  const tempPath = path.join(tmpdir(), key);
+  const tempFilename = `${randomBytes(32).toString("hex")}.${extension}`;
+  const tempPath = path.join(tmpdir(), tempFilename);
   const data = await file.arrayBuffer();
   await Bun.write(tempPath, new Uint8Array(data));
 
+  let processedPath = "";
   try {
-    await cfg.s3Client.write(key, Bun.file(tempPath), {
+    processedPath = await processVideoForFastStart(tempPath);
+  } finally {
+    await Bun.file(tempPath).unlink();
+  }
+
+  const aspect = await getVideoAspectRatio(processedPath);
+  const key = `${aspect}/${randomBytes(32).toString("hex")}.${extension}`;
+
+  try {
+    await cfg.s3Client.write(key, Bun.file(processedPath), {
       contentType: file.type,
     });
   } finally {
-    await Bun.file(tempPath).unlink();
+    if (processedPath) {
+      await Bun.file(processedPath).unlink();
+    }
   }
 
   video.videoURL = `https://${cfg.s3Bucket}.s3.${cfg.s3Region}.amazonaws.com/${key}`;
