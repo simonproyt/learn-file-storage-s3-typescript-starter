@@ -1,4 +1,5 @@
 import path from "path";
+import { randomBytes } from "crypto";
 import { getBearerToken, validateJWT } from "../auth";
 import { respondWithJSON } from "./json";
 import { getVideo, updateVideo } from "../db/videos";
@@ -62,10 +63,11 @@ export async function handlerUploadThumbnail(cfg: ApiConfig, req: BunRequest) {
     throw new BadRequestError("Unsupported thumbnail media type");
   }
 
-  const thumbnailPath = path.join(cfg.assetsRoot, `${videoId}.${extension}`);
+  const randomName = randomBytes(32).toString("base64url");
+  const thumbnailPath = path.join(cfg.assetsRoot, `${randomName}.${extension}`);
   await Bun.write(thumbnailPath, new Uint8Array(data));
 
-  video.thumbnailURL = `http://localhost:${cfg.port}/assets/${videoId}.${extension}`;
+  video.thumbnailURL = `http://localhost:${cfg.port}/assets/${randomName}.${extension}`;
   updateVideo(cfg.db, video);
 
   return respondWithJSON(200, video);
