@@ -22,7 +22,7 @@ const filepathRoot = envOrThrow("FILEPATH_ROOT");
 const assetsRoot = envOrThrow("ASSETS_ROOT");
 const s3Bucket = envOrThrow("S3_BUCKET");
 const s3Region = envOrThrow("S3_REGION");
-const s3CfDistribution = envOrThrow("S3_CF_DISTRO");
+const s3CfDistribution = normalizeUrl(envOrThrow("S3_CF_DISTRO"));
 const port = envOrThrow("PORT");
 
 const db = newDatabase(pathToDB);
@@ -46,4 +46,12 @@ function envOrThrow(key: string) {
     throw new Error(`${key} must be set`);
   }
   return envVar;
+}
+
+function normalizeUrl(value: string) {
+  let normalized = value.trim();
+  if (!/^https?:\/\//i.test(normalized)) {
+    normalized = `https://${normalized}`;
+  }
+  return normalized.replace(/\/+$/, "");
 }
